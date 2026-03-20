@@ -1,52 +1,34 @@
 <script setup lang="ts">
 import { ref, onMounted, onBeforeUnmount, computed } from 'vue'
 
-// 再生リストの型定義
+// --- 型定義 ---
 interface Song {
   id: string
+  tag: string // "7, 9" のようなカンマ区切りを想定
   start: number
   duration: number
   title: string
 }
 
-const playlist: Song[] = [
-  { id: '4ALFjALIc5Q', start: 45, duration: 15, title: 'Fighting My Way' },
-  { id: 'NBL9sMFXj1g', start: 54, duration: 15, title: 'Luna say maybe' },
-  { id: '6D0n7hzfZiY', start: 52, duration: 15, title: '世界一可愛い私' },
-  { id: '4TchmSegna0', start: 77, duration: 15, title: 'Fluorite' },
-  { id: '9qCDnZY3_G0', start: 59, duration: 15, title: '白線' },
-  { id: 'eD3jimowimI', start: 56, duration: 15, title: 'Wonder Scale' },
-  { id: 'tW_Em8uObwA', start: 58, duration: 15, title: 'Tame-Lie-One-Step' },
-  { id: 'jYqdVV-uFgg', start: 50, duration: 15, title: '光景' },
-  { id: 'P7Dg1RPe8uA', start: 56, duration: 15, title: 'clumsy trick' },
-  { id: '568aZaWSTbk', start: 64, duration: 15, title: 'The Rolling Riceball' },
-  { id: 'fGU4kGofuyg', start: 56, duration: 15, title: '小さな野望' },
-  { id: '6TZKFFRzwzs', start: 195, duration: 15, title: 'ツキノカメ' },
+interface TagInfo {
+  tag: string
+  name: string
+}
 
-  
-
-  { id: '7ANTx8MZp68', start: 56, duration: 15, title: '極光' },
-  { id: 'Ie_btWuTW6M', start: 64, duration: 15, title: 'Superlative' },
-
-  { id: 'XqIhCSiRIO4', start: 50, duration: 10, title: '冠菊' },
-  { id: 'sFq_Fc33IrA', start: 59, duration: 10, title: 'ENDLESS DANCE (花海咲季・月村手毬・藤田ことね ver.)' },
-  { id: 'VTtL0-ougbI', start: 54, duration: 10, title: 'ハッピーミルフィーユ' },
-  { id: 'ISoaL8q9TgI', start: 45, duration: 10, title: 'White Night! White Wish!' },
-  { id: 'prlcJJxDcG4', start: 72, duration: 10, title: 'ミラクルナナウ (ﾟ∀ﾟ) ！ (有村麻央・紫雲清夏・篠澤広 ver.)' },
-  { id: 'F-JRSzq4zuo', start: 54, duration: 10, title: 'ナイワ' },
-  
-  
-  { id: 'Fhwbl82WdcA', start: 69, duration: 15, title: '自己肯定感爆上げ↑↑しゅきしゅきソング' },
-  { id: 'uKG6NrHbEQ8', start: 190, duration: 15, title: 'Atmosphere' },
-  { id: 'cMHUxNhw_3s', start: 50, duration: 15, title: '36℃ U･B･U' },
-  { id: 'G8vzMH9c5Xs', start: 59, duration: 15, title: '空と約束' },
-]
-
+// --- ステート ---
+const playlist = ref<Song[]>([])
+const tagList = ref<TagInfo[]>([])
+const isEditMode = ref(true)
+const userSelection = ref<Song[]>([])
 const isStarted = ref(false)
 const isPaused = ref(false)
 const isReady = ref(false)
 const currentIndex = ref(0)
 const isProcessing = ref(false)
+const shareUrl = ref('')
+
+// フィルタリング用
+const activeTag = ref<string>('ALL')
 
 let player: any = null
 let timer: ReturnType<typeof setTimeout> | null = null
@@ -54,36 +36,113 @@ let fadeInterval: ReturnType<typeof setInterval> | null = null
 let startTime = 0
 let remainingTime = 0
 
-// 背景用のサムネイルURL
-const currentThumb = computed(() => `https://i.ytimg.com/vi/${playlist[currentIndex.value]?.id}/maxresdefault.jpg`)
+// --- コンピューテッド ---
 
-const clearAllTimers = () => {
-  if (timer) clearTimeout(timer)
-  if (fadeInterval) clearInterval(fadeInterval)
+// タグIDから名前を引くマップ
+const tagMap = computed(() => {
+  const map: Record<string, string> = {}
+  tagList.value.forEach(t => { map[t.tag] = t.name })
+  return map
+})
+
+// フィルター用タグリスト
+const availableTags = computed(() => {
+  return [{ tag: 'ALL', name: 'すべて' }, ...tagList.value]
+})
+
+// 表示用のフィルタリング済みリスト（複数タグ対応）
+const filteredPlaylist = computed(() => {
+  if (activeTag.value === 'ALL') return playlist.value
+  return playlist.value.filter(s => {
+    const tags = s.tag.split(',').map(t => t.trim())
+    return tags.includes(activeTag.value)
+  })
+})
+
+// 再生に使用するリスト
+const activePlaylist = computed(() => {
+  return userSelection.value.length > 0 ? userSelection.value : playlist.value
+})
+
+const currentThumb = computed(() => {
+  const song = activePlaylist.value[currentIndex.value]
+  return song ? `https://i.ytimg.com/vi/${song.id}/maxresdefault.jpg` : ''
+})
+
+// --- データ取得 ---
+const fetchData = async () => {
+  try {
+    const [resPlaylist, resTags] = await Promise.all([
+      fetch('./playlist.json'),
+      fetch('./taglist.json')
+    ])
+    if (!resPlaylist.ok || !resTags.ok) throw new Error('Data load failed')
+    playlist.value = await resPlaylist.json()
+    tagList.value = await resTags.json()
+  } catch (e) {
+    console.error('Error loading JSON:', e)
+  }
 }
 
+// --- プレイヤー制御 ---
 const initPlayer = () => {
+  if (player || !(window as any).YT) return 
   player = new (window as any).YT.Player('main-player', {
-    height: '100%',
-    width: '100%',
+    height: '100%', width: '100%',
     playerVars: { 
-      'autoplay': 0, 
-      'controls': 1, // 規約遵守のためコントロールを表示
-      'rel': 0, 
-      'playsinline': 1,
-      'modestbranding': 1 
+      'autoplay': 0, 'controls': 1, 'rel': 0, 
+      'playsinline': 1, 'modestbranding': 0 
     },
     events: {
       'onReady': () => { isReady.value = true },
-      'onStateChange': onPlayerStateChange
+      'onStateChange': onPlayerStateChange,
+      'onError': () => { isProcessing.value = false; switchNext() }
     }
   })
 }
 
+const onPlayerStateChange = (event: any) => {
+  if (event.data === (window as any).YT.PlayerState.PLAYING) {
+    if (!isPaused.value) {
+      player.setVolume(0); fade(100, 800); startTimers()
+    }
+    isProcessing.value = false
+  }
+  if (event.data === (window as any).YT.PlayerState.ENDED) {
+    switchNext()
+  }
+}
+
+const playSong = () => {
+  clearAllTimers()
+  const song = activePlaylist.value[currentIndex.value]
+  if (!song || !player || !player.loadVideoById) return
+  remainingTime = song.duration * 1000
+  player.loadVideoById({ videoId: song.id, startSeconds: song.start })
+}
+
+const stopAll = () => {
+  clearAllTimers()
+  if (player && player.pauseVideo) player.pauseVideo()
+  isStarted.value = false
+  isPaused.value = false
+}
+
 const switchNext = () => {
-  if (isPaused.value) return
-  currentIndex.value = (currentIndex.value + 1) % playlist.length
+  if (isPaused.value || activePlaylist.value.length === 0) return
+  currentIndex.value = (currentIndex.value + 1) % activePlaylist.value.length
   playSong()
+}
+
+const clearAllTimers = () => { 
+  if (timer) clearTimeout(timer)
+  if (fadeInterval) clearInterval(fadeInterval) 
+}
+
+const startTimers = () => {
+  startTime = Date.now()
+  if (timer) clearTimeout(timer)
+  timer = setTimeout(() => { fade(0, 1000, () => switchNext()) }, Math.max(0, remainingTime - 1000))
 }
 
 const fade = (target: number, ms: number, callback?: () => void) => {
@@ -91,231 +150,276 @@ const fade = (target: number, ms: number, callback?: () => void) => {
   const startVol = player?.getVolume ? player.getVolume() : 0
   const step = (target - startVol) / 10
   let count = 0
-  
   fadeInterval = setInterval(() => {
     count++
-    if (player?.setVolume) {
-      player.setVolume(Math.max(0, Math.min(100, startVol + (step * count))))
-    }
-    if (count >= 10) {
-      if (fadeInterval) clearInterval(fadeInterval)
-      if (callback) callback()
-    }
+    if (player?.setVolume) player.setVolume(Math.max(0, Math.min(100, startVol + (step * count))))
+    if (count >= 10) { clearInterval(fadeInterval!); if (callback) callback() }
   }, ms / 10)
 }
 
-const startTimers = () => {
-  startTime = Date.now()
-  if (timer) clearTimeout(timer)
-  timer = setTimeout(() => {
-    fade(0, 1000, () => switchNext())
-  }, remainingTime - 1000)
-}
-
-const onPlayerStateChange = (event: any) => {
-  if (event.data === (window as any).YT.PlayerState.PLAYING) {
-    if (!isPaused.value) {
-      player.setVolume(0)
-      fade(100, 1000)
-      startTimers()
-    }
-    isProcessing.value = false
-  }
-}
-
-const playSong = () => {
-  clearAllTimers()
-  const song = playlist[currentIndex.value]
-  if (!song) return
-  remainingTime = song.duration * 1000
-  if (player && player.loadVideoById) {
-    player.loadVideoById({ 
-      videoId: song.id, 
-      startSeconds: song.start 
-    })
-  }
-}
-
-const startMedley = () => {
-  if (isProcessing.value) return
-  isStarted.value = true
-  playSong()
-}
-
 const togglePause = () => {
-  if (isProcessing.value) return
+  if (isProcessing.value || !player) return
   isProcessing.value = true
   if (isPaused.value) {
-    isPaused.value = false
-    player.playVideo()
-    fade(100, 500)
+    isPaused.value = false; player.playVideo(); fade(100, 500)
   } else {
-    isPaused.value = true
-    clearAllTimers()
-    remainingTime -= (Date.now() - startTime)
-    fade(0, 500, () => {
-      player.pauseVideo()
-      isProcessing.value = false
-    })
+    isPaused.value = true; clearAllTimers(); remainingTime -= (Date.now() - startTime)
+    fade(0, 500, () => { player.pauseVideo(); isProcessing.value = false })
   }
 }
 
-onMounted(() => {
-  if (!(window as any).YT) {
+// --- UI操作 ---
+const loadFromParams = () => {
+  const params = new URLSearchParams(window.location.search)
+  const data = params.get('m')
+  if (data) {
+    try {
+      const ids = JSON.parse(atob(data)) as string[]
+      const restored = ids.map(id => playlist.value.find(s => s.id === id)).filter((s): s is Song => !!s)
+      if (restored.length > 0) { userSelection.value = restored; isEditMode.value = false }
+    } catch (e) { console.error(e) }
+  }
+}
+
+const getSelectedIndex = (song: Song) => userSelection.value.findIndex(s => s.id === song.id)
+
+const toggleSongSelection = (song: Song) => {
+  const idx = getSelectedIndex(song)
+  if (idx > -1) userSelection.value.splice(idx, 1)
+  else if (userSelection.value.length < 10) userSelection.value.push(song)
+}
+
+const clearSelection = () => { if(confirm('リストをクリアしますか？')) userSelection.value = [] }
+
+const confirmSelection = () => {
+  if (userSelection.value.length === 0) return
+  stopAll()
+  isEditMode.value = false
+  currentIndex.value = 0
+  const ids = userSelection.value.map(s => s.id)
+  shareUrl.value = `${window.location.origin}${window.location.pathname}?m=${btoa(JSON.stringify(ids))}`
+}
+
+const copyLink = () => {
+  navigator.clipboard.writeText(shareUrl.value)
+  alert('コピーしました！')
+}
+
+onMounted(async () => {
+  await fetchData()
+  loadFromParams()
+  if ((window as any).YT && (window as any).YT.Player) initPlayer()
+  else {
     const tag = document.createElement('script')
     tag.src = "https://www.youtube.com/iframe_api"
     document.head.appendChild(tag)
+    ;(window as any).onYouTubeIframeAPIReady = () => initPlayer()
   }
-  (window as any).onYouTubeIframeAPIReady = () => initPlayer()
 })
 
-onBeforeUnmount(() => {
-  clearAllTimers()
-  if (player) player.destroy()
-})
+onBeforeUnmount(() => { stopAll(); if (player && player.destroy) player.destroy() })
 </script>
 
 <template>
-  <div class="medley-wrapper">
-    <div class="bg-blur" :style="{ backgroundImage: `url(${currentThumb})` }"></div>
+  <div class="app-container">
+    
+    <div class="medley-wrapper">
+      <div class="bg-blur" :style="{ backgroundImage: `url(${currentThumb})` }"></div>
 
-    <div class="monitor">
-      <div class="card">
-        <div class="video-container">
-          <div id="main-player"></div>
-          
-          <div v-if="!isStarted" class="start-overlay">
-            <button @click="startMedley" :disabled="!isReady || isProcessing" class="play-btn">
-              {{ isReady ? 'PRODUCE START' : 'LOADING...' }}
+      <div class="monitor">
+        <div v-show="isEditMode" class="card edit-card">
+          <div class="header">
+            <div class="header-top">
+              <h3 class="main-title">最強のプラチナガシャ画面を作ろう</h3>
+            </div>
+            <div class="selection-status">
+              <span>MY LINEUP ({{ userSelection.length }}/10)</span>
+              <button v-show="userSelection.length > 0" @click="clearSelection" class="clear-btn">CLEAR</button>
+            </div>
+            <div class="tag-filter-container">
+              <button 
+                v-for="t in availableTags" 
+                :key="t.tag" 
+                @click="activeTag = t.tag"
+                :class="{ 'active': activeTag === t.tag }"
+                class="tag-btn"
+              >
+                {{ t.name }}
+              </button>
+            </div>
+          </div>
+
+          <div class="song-list-scroll">
+            <div 
+              v-for="song in filteredPlaylist" 
+              :key="song.id" 
+              class="song-item"
+              :class="{ 'is-selected': getSelectedIndex(song) > -1 }"
+              @click="toggleSongSelection(song)"
+            >
+              <div class="selection-order">
+                <span v-if="getSelectedIndex(song) > -1">{{ getSelectedIndex(song) + 1 }}</span>
+              </div>
+              <img :src="`https://i.ytimg.com/vi/${song.id}/default.jpg`" class="mini-thumb" />
+              <div class="song-info">
+                <span class="song-title">{{ song.title }}</span>
+                <div class="tag-badges">
+                  <span 
+                    v-for="tId in song.tag.split(',').map(s => s.trim())" 
+                    :key="tId" 
+                    class="song-tag-badge"
+                  >
+                    {{ tagMap[tId] || tId }}
+                  </span>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <div class="footer">
+            <button @click="confirmSelection" class="confirm-btn" :disabled="userSelection.length === 0">
+              ラインナップを確定させる
             </button>
           </div>
         </div>
 
-        <div class="info-area" v-if="isStarted">
-          <p class="now-playing">NOW PLAYING</p>
-          <h2 class="title-text">{{ playlist[currentIndex]?.title }}</h2>
-          
-          <div class="progress-bar-bg">
-            <div 
-              class="progress-bar-fill" 
-              :style="{ animationDuration: playlist[currentIndex]?.duration + 's' }" 
-              :class="{ paused: isPaused }" 
-              :key="currentIndex"
-            ></div>
+        <div v-show="!isEditMode" class="card play-card">
+          <div class="video-section">
+            <div id="main-player"></div>
           </div>
 
-          <div class="controls">
-            <button @click="togglePause" :disabled="isProcessing" class="ctrl-btn">
-              {{ isPaused ? 'RESUME' : 'PAUSE' }}
-            </button>
-            <a :href="`https://www.youtube.com/watch?v=${playlist[currentIndex]?.id}`" target="_blank" class="link-btn">
-              Youtubeで見る
-            </a>
+          <div class="info-area">
+            <div v-if="!isStarted" class="setup-panel">
+              <button @click="isStarted = true; playSong()" :disabled="!isReady || isProcessing" class="play-btn">
+                {{ isReady ? 'DEMO START' : 'LOADING...' }}
+              </button>
+            </div>
+
+            <div v-else class="playing-panel">
+              <p class="now-playing">NOW PLAYING ({{currentIndex + 1}}/{{activePlaylist.length}})</p>
+              <h2 class="title-text">{{ activePlaylist[currentIndex]?.title }}</h2>
+              
+              <div class="progress-bar-bg">
+                <div class="progress-bar-fill" :style="{ animationDuration: activePlaylist[currentIndex]?.duration + 's' }" :class="{ paused: isPaused }" :key="currentIndex"></div>
+              </div>
+
+              <div class="controls">
+                <button @click="togglePause" :disabled="isProcessing" class="ctrl-btn">
+                  {{ isPaused ? 'RESUME' : 'PAUSE' }}
+                </button>
+                <button @click="isEditMode = true; stopAll()" class="ctrl-btn">EDIT</button>
+                
+                <a :href="`https://www.youtube.com/watch?v=${activePlaylist[currentIndex]?.id}`" target="_blank" class="ctrl-btn original-link">
+                  ORIGINAL
+                </a>
+
+                <button @click="copyLink" class="ctrl-btn share">SHARE</button>
+              </div>
+            </div>
           </div>
         </div>
       </div>
     </div>
+
+    <footer class="disclaimer-outer">
+      <p>本サイトは個人による非公式ファンサイトです。</p>
+      <p>動画はYouTube公式チャンネルのコンテンツをAPIにより引用しており、本サイトが所有するものではありません。権利元からの要請があった場合は速やかに公開を停止します。</p>
+      <!-- <p>© Bandai Namco Entertainment Inc.</p> -->
+    </footer>
+
   </div>
 </template>
 
 <style scoped>
-.medley-wrapper {
-  background: #000;
+/* コンテンツ全体を縦に並べるためのルート */
+.app-container {
+  display: flex;
+  flex-direction: column;
   min-height: 100vh;
-  display: flex;
-  justify-content: center;
-  align-items: center;
-  font-family: 'Avenir', sans-serif;
-  position: relative;
-  overflow: hidden;
-}
-
-.bg-blur {
-  position: absolute;
-  inset: -20px;
-  background-size: cover;
-  background-position: center;
-  filter: blur(30px) brightness(0.3);
-  z-index: 0;
-  transition: background-image 1s ease;
-}
-
-.monitor {
-  width: 90%;
-  max-width: 500px;
-  z-index: 1;
-}
-
-.card {
-  background: rgba(30, 30, 30, 0.9);
-  backdrop-filter: blur(10px);
-  border-radius: 20px;
-  overflow: hidden;
-  box-shadow: 0 30px 60px rgba(0,0,0,0.8);
-  border: 1px solid rgba(255,255,255,0.1);
-}
-
-.video-container {
-  position: relative;
-  width: 100%;
-  aspect-ratio: 16 / 9;
   background: #000;
 }
 
-.start-overlay {
-  position: absolute;
-  inset: 0;
-  display: flex;
-  justify-content: center;
-  align-items: center;
-  background: rgba(0,0,0,0.7);
-  z-index: 10;
-}
-
-.play-btn {
-  background: #f06;
-  color: #fff;
-  border: none;
-  padding: 18px 36px;
-  border-radius: 40px;
-  font-weight: bold;
-  cursor: pointer;
-  box-shadow: 0 0 20px rgba(255, 0, 102, 0.5);
-  transition: transform 0.2s;
-}
-
-.play-btn:active { transform: scale(0.95); }
-
-.info-area { padding: 25px; text-align: center; }
-.now-playing { font-size: 11px; color: #f06; letter-spacing: 3px; margin: 0; font-weight: 900; }
-.title-text { 
-  font-size: 20px; 
-  margin: 12px 0 20px; 
-  color: #fff; 
-  white-space: nowrap; 
+.medley-wrapper { 
+  flex: 1; /* 余ったスペースをすべて使い、中央にモニターを配置 */
+  background: #000; 
+  display: flex; 
+  justify-content: center; 
+  align-items: center; 
+  font-family: sans-serif; 
+  position: relative; 
   overflow: hidden; 
-  text-overflow: ellipsis; 
+  color: #fff; 
 }
+
+.bg-blur { position: absolute; inset: -20px; background-size: cover; background-position: center; filter: blur(50px) brightness(0.2); z-index: 0; transition: background-image 1.2s ease; }
+.monitor { width: 95%; max-width: 500px; z-index: 1; }
+.card { background: rgba(15, 15, 15, 0.95); backdrop-filter: blur(20px); border-radius: 24px; overflow: hidden; box-shadow: 0 25px 50px rgba(0,0,0,0.8); border: 1px solid rgba(255,255,255,0.1); }
+
+.edit-card { height: 85vh; display: flex; flex-direction: column; }
+.header { padding: 20px; border-bottom: 1px solid rgba(255,255,255,0.05); }
+
+.main-title { margin: 0 0 10px 0; font-size: 16px; color: #f06; text-shadow: 0 0 10px rgba(255, 0, 102, 0.5); font-weight: bold; text-align: center; letter-spacing: 0.5px; }
+.selection-status { display: flex; justify-content: space-between; align-items: center; margin-bottom: 15px; font-size: 12px; color: #888; letter-spacing: 1px; }
+
+.clear-btn { background: transparent; border: 1px solid #444; color: #888; font-size: 10px; padding: 4px 10px; border-radius: 4px; cursor: pointer; transition: 0.2s; }
+.clear-btn:hover { border-color: #f06; color: #f06; }
+
+.tag-filter-container { display: flex; flex-wrap: wrap; gap: 8px; max-height: 120px; overflow-y: auto; padding-right: 4px; }
+.tag-btn { background: rgba(255,255,255,0.05); border: 1px solid rgba(255,255,255,0.1); color: #ccc; padding: 6px 12px; border-radius: 15px; font-size: 11px; cursor: pointer; transition: 0.2s; }
+.tag-btn.active { background: #f06; border-color: #f06; color: #fff; }
+
+.song-list-scroll { flex: 1; overflow-y: auto; padding: 10px; }
+.song-item { display: flex; align-items: center; padding: 10px; margin-bottom: 8px; border-radius: 12px; background: rgba(255,255,255,0.03); cursor: pointer; transition: 0.2s; border: 1px solid transparent; }
+.song-item.is-selected { background: rgba(255, 0, 102, 0.15); border: 1px solid #f06; }
+
+.selection-order { width: 22px; height: 22px; display: flex; align-items: center; justify-content: center; background: rgba(255,255,255,0.1); border-radius: 50%; margin-right: 12px; font-size: 11px; font-weight: bold; }
+.is-selected .selection-order { background: #f06; color: #fff; }
+
+.mini-thumb { width: 60px; height: 34px; object-fit: cover; border-radius: 4px; margin-right: 12px; }
+.song-info { flex: 1; display: flex; flex-direction: column; overflow: hidden; }
+.song-title { font-size: 13px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+
+.tag-badges { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 4px; }
+.song-tag-badge { font-size: 9px; color: #f06; font-weight: bold; border: 1px solid rgba(255, 0, 102, 0.3); padding: 1px 5px; border-radius: 4px; }
+
+.video-section { width: 100%; aspect-ratio: 16 / 9; background: #000; }
+.info-area { padding: 30px 20px; min-height: 200px; text-align: center; }
+.play-btn { background: #f06; color: #fff; border: none; padding: 16px 40px; border-radius: 30px; font-weight: bold; cursor: pointer; box-shadow: 0 4px 15px rgba(255, 0, 102, 0.4); }
+.now-playing { font-size: 10px; color: #f06; font-weight: bold; margin-bottom: 8px; }
+.title-text { font-size: 16px; margin-bottom: 20px; }
 
 .progress-bar-bg { width: 100%; height: 4px; background: rgba(255,255,255,0.1); border-radius: 2px; margin-bottom: 25px; overflow: hidden; }
 .progress-bar-fill { height: 100%; background: #f06; width: 0; animation: fill linear forwards; }
 .progress-bar-fill.paused { animation-play-state: paused; }
 
-.controls { display: flex; gap: 10px; justify-content: center; }
-.ctrl-btn, .link-btn {
-  background: transparent;
-  border: 1px solid rgba(255,255,255,0.2);
-  color: #fff;
-  padding: 10px 20px;
-  border-radius: 25px;
-  cursor: pointer;
-  font-size: 12px;
-  text-decoration: none;
-  display: flex;
-  align-items: center;
-  transition: 0.3s;
+.controls { display: flex; gap: 8px; justify-content: center; flex-wrap: wrap; }
+.ctrl-btn { 
+  display: inline-flex; align-items: center; justify-content: center; text-decoration: none;
+  background: rgba(255,255,255,0.05); border: 1px solid rgba(255,255,255,0.1); 
+  color: #fff; padding: 10px 16px; border-radius: 20px; font-size: 12px; cursor: pointer; transition: 0.2s;
 }
-.ctrl-btn:hover, .link-btn:hover { background: rgba(255,255,255,0.1); border-color: #fff; }
+.ctrl-btn:hover { background: rgba(255, 255, 255, 0.1); }
+.original-link { border-color: rgba(255, 0, 0, 0.5); color: #ff4444; }
+.original-link:hover { background: rgba(255, 0, 0, 0.1); }
+.share { border-color: #f06; color: #f06; }
+
+.footer { padding: 15px; }
+.confirm-btn { width: 100%; background: #f06; color: #fff; border: none; padding: 15px; border-radius: 30px; font-weight: bold; cursor: pointer; transition: 0.3s; box-shadow: 0 4px 15px rgba(255, 0, 102, 0.3); }
+.confirm-btn:hover:not(:disabled) { transform: translateY(-2px); box-shadow: 0 6px 20px rgba(255, 0, 102, 0.5); }
+.confirm-btn:disabled { background: #222; color: #444; box-shadow: none; }
+
+/* medley-wrapperの外側の免責事項 */
+.disclaimer-outer {
+  background: #000;
+  text-align: center;
+  font-size: 10px;
+  color: rgba(255, 255, 255, 0.4);
+  line-height: 1.6;
+  padding: 20px;
+  border-top: 1px solid rgba(255, 255, 255, 0.1);
+  position: relative;
+  z-index: 10;
+}
 
 @keyframes fill { from { width: 0%; } to { width: 100%; } }
 </style>
