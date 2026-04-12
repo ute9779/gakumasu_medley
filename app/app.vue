@@ -1,6 +1,4 @@
 <script setup lang="ts">
-import { ref, onMounted, onBeforeUnmount, computed } from 'vue'
-
 // --- 型定義 ---
 interface Song {
   id: string
@@ -18,51 +16,52 @@ interface TagInfo {
 // --- ステート ---
 const playlist = ref<Song[]>([])
 const tagList = ref<TagInfo[]>([])
-const isEditMode = ref(true)
 const userSelection = ref<Song[]>([])
+
+const isEditMode = ref(true)
 const isStarted = ref(false)
 const isPaused = ref(false)
 const isReady = ref(false)
-const currentIndex = ref(0)
 const isProcessing = ref(false)
+
+const currentIndex = ref(0)
+const volume = ref(50) // 初期音量を50に設定
+const activeTag = ref<string>('ALL') // フィルタリング用
 const shareUrl = ref('')
 
-// フィルタリング用
-const activeTag = ref<string>('ALL')
-
+// 内部変数
 let player: any = null
 let timer: ReturnType<typeof setTimeout> | null = null
 let fadeInterval: ReturnType<typeof setInterval> | null = null
 let startTime = 0
 let remainingTime = 0
 
-// --- コンピューテッド ---
-
 // タグIDから名前を引くマップ
 const tagMap = computed(() => {
-  const map: Record<string, string> = {}
-  tagList.value.forEach(t => { map[t.tag] = t.name })
-  return map
+  return tagList.value.reduce((acc, t) => {
+    acc[t.tag] = t.name
+    return acc
+  }, {} as Record<string, string>)
 })
 
 // フィルター用タグリスト
-const availableTags = computed(() => {
-  return [{ tag: 'ALL', name: 'すべて' }, ...tagList.value]
-})
+const availableTags = computed(() => [
+  { tag: 'ALL', name: 'すべて' },
+  ...tagList.value
+])
 
 // 表示用のフィルタリング済みリスト（複数タグ対応）
 const filteredPlaylist = computed(() => {
   if (activeTag.value === 'ALL') return playlist.value
-  return playlist.value.filter(s => {
-    const tags = s.tag.split(',').map(t => t.trim())
-    return tags.includes(activeTag.value)
-  })
+  return playlist.value.filter(s => 
+    s.tag.split(',').map(t => t.trim()).includes(activeTag.value)
+  )
 })
 
 // 再生に使用するリスト
-const activePlaylist = computed(() => {
-  return userSelection.value.length > 0 ? userSelection.value : playlist.value
-})
+const activePlaylist = computed(() => 
+  userSelection.value.length > 0 ? userSelection.value : playlist.value
+)
 
 const currentThumb = computed(() => {
   const song = activePlaylist.value[currentIndex.value]
@@ -85,10 +84,79 @@ const fetchData = async () => {
 }
 
 // --- プレイヤー制御 ---
+
+const clearAllTimers = () => { 
+  if (timer) { clearTimeout(timer); timer = null }
+  if (fadeInterval) { clearInterval(fadeInterval); fadeInterval = null }
+}
+
+const fade = (target: number, ms: number, callback?: () => void) => {
+  if (fadeInterval) clearInterval(fadeInterval)
+  
+  const startVol = player?.getVolume ? player.getVolume() : 0
+  const finalVol = target === 0 ? 0 : Number(volume.value)
+  const step = (finalVol - startVol) / 10
+  let count = 0
+  
+  fadeInterval = setInterval(() => {
+    count++
+    if (player?.setVolume) {
+      player.setVolume(Math.max(0, Math.min(100, startVol + (step * count))))
+    }
+    if (count >= 10) { 
+      clearInterval(fadeInterval!)
+      fadeInterval = null
+      if (callback) callback() 
+    }
+  }, ms / 10)
+}
+
+const startTimers = () => {
+  startTime = Date.now()
+  if (timer) clearTimeout(timer)
+  timer = setTimeout(() => { 
+    fade(0, 1000, () => switchNext()) 
+  }, Math.max(0, remainingTime - 1000))
+}
+
+const playSong = () => {
+  clearAllTimers()
+  const song = activePlaylist.value[currentIndex.value]
+  if (!song || !player?.loadVideoById) return
+  
+  remainingTime = song.duration * 1000
+  player.loadVideoById({ 
+    videoId: song.id, 
+    startSeconds: song.start 
+  })
+}
+
+const switchNext = () => {
+  if (isPaused.value || activePlaylist.value.length === 0) return
+  currentIndex.value = (currentIndex.value + 1) % activePlaylist.value.length
+  playSong()
+}
+
+const onPlayerStateChange = (event: any) => {
+  const YT = (window as any).YT
+  if (event.data === YT.PlayerState.PLAYING) {
+    if (!isPaused.value) {
+      player.setVolume(0)
+      fade(volume.value, 800) 
+      startTimers()
+    }
+    isProcessing.value = false
+  }
+  if (event.data === YT.PlayerState.ENDED) {
+    switchNext()
+  }
+}
+
 const initPlayer = () => {
   if (player || !(window as any).YT) return 
   player = new (window as any).YT.Player('main-player', {
-    height: '100%', width: '100%',
+    height: '100%', 
+    width: '100%',
     playerVars: { 
       'autoplay': 0, 'controls': 1, 'rel': 0, 
       'playsinline': 1, 'modestbranding': 0 
@@ -101,95 +169,61 @@ const initPlayer = () => {
   })
 }
 
-const onPlayerStateChange = (event: any) => {
-  if (event.data === (window as any).YT.PlayerState.PLAYING) {
-    if (!isPaused.value) {
-      player.setVolume(0); fade(100, 800); startTimers()
+// --- 外部公開用メソッド ---
+
+const handleVolumeChange = () => {
+  if (player?.setVolume) {
+    // ユーザーが操作したら強制的にフェードタイマーを殺す
+    if (fadeInterval) {
+      clearInterval(fadeInterval)
+      fadeInterval = null
     }
-    isProcessing.value = false
+    player.setVolume(Number(volume.value)) // 確実に数値として渡す
   }
-  if (event.data === (window as any).YT.PlayerState.ENDED) {
-    switchNext()
-  }
-}
-
-const playSong = () => {
-  clearAllTimers()
-  const song = activePlaylist.value[currentIndex.value]
-  if (!song || !player || !player.loadVideoById) return
-  remainingTime = song.duration * 1000
-  player.loadVideoById({ videoId: song.id, startSeconds: song.start })
-}
-
-const stopAll = () => {
-  clearAllTimers()
-  if (player && player.pauseVideo) player.pauseVideo()
-  isStarted.value = false
-  isPaused.value = false
-}
-
-const switchNext = () => {
-  if (isPaused.value || activePlaylist.value.length === 0) return
-  currentIndex.value = (currentIndex.value + 1) % activePlaylist.value.length
-  playSong()
-}
-
-const clearAllTimers = () => { 
-  if (timer) clearTimeout(timer)
-  if (fadeInterval) clearInterval(fadeInterval) 
-}
-
-const startTimers = () => {
-  startTime = Date.now()
-  if (timer) clearTimeout(timer)
-  timer = setTimeout(() => { fade(0, 1000, () => switchNext()) }, Math.max(0, remainingTime - 1000))
-}
-
-const fade = (target: number, ms: number, callback?: () => void) => {
-  if (fadeInterval) clearInterval(fadeInterval)
-  const startVol = player?.getVolume ? player.getVolume() : 0
-  const step = (target - startVol) / 10
-  let count = 0
-  fadeInterval = setInterval(() => {
-    count++
-    if (player?.setVolume) player.setVolume(Math.max(0, Math.min(100, startVol + (step * count))))
-    if (count >= 10) { clearInterval(fadeInterval!); if (callback) callback() }
-  }, ms / 10)
 }
 
 const togglePause = () => {
   if (isProcessing.value || !player) return
   isProcessing.value = true
+  
   if (isPaused.value) {
-    isPaused.value = false; player.playVideo(); fade(100, 500)
+    isPaused.value = false
+    player.playVideo()
+    fade(volume.value, 500)
   } else {
-    isPaused.value = true; clearAllTimers(); remainingTime -= (Date.now() - startTime)
-    fade(0, 500, () => { player.pauseVideo(); isProcessing.value = false })
+    isPaused.value = true
+    clearAllTimers()
+    remainingTime -= (Date.now() - startTime)
+    fade(0, 500, () => { 
+      player.pauseVideo()
+      isProcessing.value = false 
+    })
   }
 }
 
-// --- UI操作 ---
-const loadFromParams = () => {
-  const params = new URLSearchParams(window.location.search)
-  const data = params.get('m')
-  if (data) {
-    try {
-      const ids = JSON.parse(atob(data)) as string[]
-      const restored = ids.map(id => playlist.value.find(s => s.id === id)).filter((s): s is Song => !!s)
-      if (restored.length > 0) { userSelection.value = restored; isEditMode.value = false }
-    } catch (e) { console.error(e) }
-  }
+const stopAll = () => {
+  clearAllTimers()
+  if (player?.pauseVideo) player.pauseVideo()
+  isStarted.value = false
+  isPaused.value = false
 }
+
+// --- UI操作 ---
 
 const getSelectedIndex = (song: Song) => userSelection.value.findIndex(s => s.id === song.id)
 
 const toggleSongSelection = (song: Song) => {
   const idx = getSelectedIndex(song)
-  if (idx > -1) userSelection.value.splice(idx, 1)
-  else if (userSelection.value.length < 10) userSelection.value.push(song)
+  if (idx > -1) {
+    userSelection.value.splice(idx, 1)
+  } else if (userSelection.value.length < 10) {
+    userSelection.value.push(song)
+  }
 }
 
-const clearSelection = () => { if(confirm('リストをクリアしますか？')) userSelection.value = [] }
+const clearSelection = () => { 
+  if (confirm('リストをクリアしますか？')) userSelection.value = [] 
+}
 
 const confirmSelection = () => {
   if (userSelection.value.length === 0) return
@@ -205,11 +239,35 @@ const copyLink = () => {
   alert('コピーしました！')
 }
 
+const loadFromParams = () => {
+  const params = new URLSearchParams(window.location.search)
+  const data = params.get('m')
+  if (!data) return
+  
+  try {
+    const ids = JSON.parse(atob(data)) as string[]
+    const restored = ids
+      .map(id => playlist.value.find(s => s.id === id))
+      .filter((s): s is Song => !!s)
+      
+    if (restored.length > 0) { 
+      userSelection.value = restored
+      isEditMode.value = false 
+    }
+  } catch (e) { 
+    console.error('URL parameter parse error:', e) 
+  }
+}
+
+// --- ライフサイクル ---
+
 onMounted(async () => {
   await fetchData()
   loadFromParams()
-  if ((window as any).YT && (window as any).YT.Player) initPlayer()
-  else {
+  
+  if ((window as any).YT?.Player) {
+    initPlayer()
+  } else {
     const tag = document.createElement('script')
     tag.src = "https://www.youtube.com/iframe_api"
     document.head.appendChild(tag)
@@ -217,7 +275,10 @@ onMounted(async () => {
   }
 })
 
-onBeforeUnmount(() => { stopAll(); if (player && player.destroy) player.destroy() })
+onBeforeUnmount(() => { 
+  stopAll()
+  if (player?.destroy) player.destroy() 
+})
 </script>
 
 <template>
@@ -304,6 +365,18 @@ onBeforeUnmount(() => { stopAll(); if (player && player.destroy) player.destroy(
               </div>
 
               <div class="controls">
+                <div class="volume-control">
+                  <span class="volume-icon">Vol</span>
+                  <input 
+                    type="range" 
+                    v-model="volume" 
+                    min="0" 
+                    max="100" 
+                    @input="handleVolumeChange"
+                    class="volume-slider"
+                  />
+                  <span class="volume-num">{{ volume }}</span>
+                </div>
                 <button @click="togglePause" :disabled="isProcessing" class="ctrl-btn">
                   {{ isPaused ? 'RESUME' : 'PAUSE' }}
                 </button>
@@ -422,4 +495,33 @@ onBeforeUnmount(() => { stopAll(); if (player && player.destroy) player.destroy(
 }
 
 @keyframes fill { from { width: 0%; } to { width: 100%; } }
+
+.volume-control {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  margin-bottom: 15px;
+  padding: 0 20px;
+  background: rgba(255, 255, 255, 0.05);
+  border-radius: 10px;
+}
+
+.volume-icon {
+  font-size: 10px;
+  font-weight: bold;
+  color: #f06;
+}
+
+.volume-slider {
+  flex: 1;
+  accent-color: #f06; /* スライダーの色をテーマカラーに */
+  cursor: pointer;
+}
+
+.volume-num {
+  font-size: 12px;
+  min-width: 25px;
+  font-family: monospace;
+}
 </style>
